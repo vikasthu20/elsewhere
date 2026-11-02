@@ -1,0 +1,11 @@
+# Security and production checklist
+- Replace `SECRET_KEY`; use a managed secret store.
+- Enforce HTTPS, secure cookies or carefully managed bearer tokens, CSRF strategy, strict CORS and rate limiting.
+- Add refresh-token rotation, logout/session revocation and MFA for privileged accounts.
+- Verify email/phone with expiring OTPs through a configured provider; never log OTPs.
+- Store identity/vehicle documents in private object storage with short-lived authorised links and malware scanning.
+- Add server-side role and ownership checks to every mutation.
+- Enforce booking concurrency with database exclusion constraints/transactions before production.
+- Add payment gateway idempotency and signed webhook verification before enabling payments.
+- Add audit events, backups, restore drills, monitoring, vulnerability scans and retention controls.
+- Obtain qualified review of applicable Indian privacy, consumer, transport, tax and e-commerce obligations.

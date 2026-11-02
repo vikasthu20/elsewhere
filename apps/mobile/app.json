@@ -1,0 +1,1 @@
+{"expo":{"name":"Elsewhere","slug":"elsewhere-travel","scheme":"elsewhere","version":"1.0.0","orientation":"portrait","userInterfaceStyle":"light","splash":{"backgroundColor":"#f5f1e8"},"ios":{"supportsTablet":true,"bundleIdentifier":"com.elsewhere.travel"},"android":{"package":"com.elsewhere.travel","adaptiveIcon":{"backgroundColor":"#f5f1e8"}},"plugins":["expo-secure-store"]}}
