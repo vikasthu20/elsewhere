@@ -1,4 +1,5 @@
 from datetime import date
+from decimal import Decimal
 from typing import Optional
 from pydantic import BaseModel, EmailStr, Field, ConfigDict
 
@@ -52,6 +53,30 @@ class ReviewIn(BaseModel):
     comment: str = Field(default="", max_length=3000)
 
 
+class ProviderProfileIn(BaseModel):
+    business_name: str = Field(default="", max_length=180)
+    description: str = Field(default="", max_length=12000)
+    contact_phone: str | None = Field(default=None, max_length=30)
+    website_url: str | None = Field(default=None, max_length=500)
+    address: str = Field(default="", max_length=300)
+    service_areas: list[str] = Field(default_factory=list, max_length=50)
+    pricing_notes: str = Field(default="", max_length=1000)
+
+
+class TourPackageIn(BaseModel):
+    title: str = Field(min_length=2, max_length=180)
+    description: str = Field(default="", max_length=12000)
+    destination: str = Field(default="", max_length=180)
+    duration_days: int = Field(default=1, ge=1, le=365)
+    price_per_person: Decimal = Field(default=Decimal("0"), ge=0, max_digits=12, decimal_places=2)
+    max_travellers: int = Field(default=10, ge=1, le=500)
+    inclusions: list[str] = Field(default_factory=list, max_length=100)
+    exclusions: list[str] = Field(default_factory=list, max_length=100)
+    itinerary: list[dict] = Field(default_factory=list, max_length=100)
+    image_url: str | None = Field(default=None, max_length=500)
+    status: str = Field(default="draft", pattern="^(draft|published|archived)$")
+
+
 class SupportTicketIn(BaseModel):
     subject: str = Field(min_length=4, max_length=180)
     message: str = Field(min_length=10, max_length=10000)
@@ -100,3 +125,37 @@ class PasswordResetIn(BaseModel):
     destination: str = Field(min_length=5, max_length=255)
     code: str = Field(pattern="^[0-9]{6}$")
     new_password: str = Field(min_length=10, max_length=128)
+
+
+class TourPackageRequestIn(BaseModel):
+    start_date: date
+    travellers: int = Field(ge=1, le=500)
+    contact_phone: str = Field(min_length=7, max_length=30)
+    message: str = Field(default="", max_length=2000)
+
+class TourPackageRequestUpdateIn(BaseModel):
+    status: str = Field(pattern="^(reviewing|confirmed|declined|cancelled)$")
+    provider_note: str = Field(default="", max_length=2000)
+
+
+class TourPackagePaymentReferenceIn(BaseModel):
+    payment_reference: str = Field(min_length=4, max_length=160)
+
+class TourPackagePaymentDecisionIn(BaseModel):
+    status: str = Field(pattern="^(paid|rejected)$")
+    note: str = Field(default="", max_length=1000)
+
+
+class TourPackagePayoutRequestIn(BaseModel):
+    amount: Decimal = Field(gt=0, max_digits=12, decimal_places=2)
+    currency: str = Field(min_length=3, max_length=3)
+    account_holder: str = Field(min_length=2, max_length=160)
+    bank_name: str = Field(min_length=2, max_length=120)
+    account_last4: str = Field(pattern="^[0-9]{4}$")
+    provider_note: str = Field(default="", max_length=1000)
+
+
+class TourPackagePayoutDecisionIn(BaseModel):
+    status: str = Field(pattern="^(processing|paid|rejected)$")
+    payout_reference: str = Field(default="", max_length=160)
+    admin_note: str = Field(default="", max_length=1000)

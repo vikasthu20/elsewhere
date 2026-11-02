@@ -61,6 +61,13 @@ def notifications(db: Session = Depends(get_db), user: User = Depends(current_us
     return [{"id": n.id, "title": n.title, "body": n.body, "channel": n.channel,
              "read_at": n.read_at, "created_at": n.created_at} for n in rows]
 
+@router.get("/notifications/unread-count", tags=["notifications"])
+def unread_notification_count(db: Session = Depends(get_db), user: User = Depends(current_user)):
+    count = db.query(Notification).filter(
+        Notification.user_id == user.id, Notification.read_at.is_(None)
+    ).count()
+    return {"unread_count": count}
+
 @router.post("/notifications/{notification_id}/read", tags=["notifications"])
 def mark_notification_read(notification_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)):
     item = db.query(Notification).filter(Notification.id == notification_id, Notification.user_id == user.id).first()

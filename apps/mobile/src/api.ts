@@ -1,4 +1,5 @@
 import * as SecureStore from 'expo-secure-store';
+declare const process: { env: { EXPO_PUBLIC_API_URL?: string } };
 const BASE = process.env.EXPO_PUBLIC_API_URL || 'http://localhost:8000/api/v1';
 export async function api(path:string, options:RequestInit={}) {
   const headers = new Headers(options.headers);

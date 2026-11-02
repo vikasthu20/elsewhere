@@ -102,16 +102,25 @@ Set `EXPO_PUBLIC_API_URL` to a reachable API URL. Android emulator commonly uses
 
 See `apps/api/.env.example`. Do not commit real credentials. For production, use a managed secret store, HTTPS, strict CORS, secure session/token rotation, rate limits, MFA for privileged users and encrypted private object storage.
 
-## Important limitations — not production complete
+## Continuation implementation
 
-The current source implements a functional foundation and key flows, but does not yet implement every one of the 100+ planned screen surfaces or every requirement in the master brief. In particular:
-- Real geocoding, route directions, live visiting hours and map licensing/API integration are not configured.
-- OTP/email/SMS delivery and password-reset token delivery are not configured; the forgot-password screen is informational only.
-- OAuth Google/Apple sign-in buttons are intentionally not active until provider credentials and callback flows are configured.
-- Payment gateway, refund and signed webhook integration are not implemented.
-- Private document upload, malware scanning and official vehicle-document verification are not implemented.
-- Admin/agency dashboards are initial operational shells; moderation, full role/permission management, audit history and package management still need work.
-- Booking concurrency needs a PostgreSQL exclusion constraint or equivalent transaction/locking strategy and dedicated concurrency tests before accepting live bookings.
-- Sample destination and vehicle imagery/content are illustrative. Do not present sample prices, ratings, availability or generated itineraries as verified live facts.
+The continuation adds persistent support tickets, staff ticket management, in-app notification inbox/read state, owner driver records and assignments, vehicle maintenance history, audit events, admin vehicle verification, OTP-based password reset in local development mode, document metadata registration, booking cancellation, and payment/refund request boundaries. API clients for these operations are provided for web and mobile.
 
-Run the test suite with `pytest apps/api/tests`. Verify production builds and simulator/device behaviour in the target development environment before deployment.
+Run `alembic upgrade head` before starting the API. The API no longer silently creates production schema at startup; Alembic is the schema authority.
+
+## Integration boundaries and remaining work
+
+- OTP challenge generation, expiry and hashed storage are implemented. `OTP_DELIVERY_MODE=console` returns a development code only; production SMS/email delivery still needs a provider adapter and credentials.
+- Password reset is implemented for an email address after OTP verification. Contact verification, OAuth and account recovery email delivery still need provider flows.
+- Payment intent contract is present but returns an explicit provider-not-configured response until a gateway adapter, credentials and signed webhook handler are added. Refund requests enter manual support review; no money is transferred.
+- Document metadata validation is implemented. Binary upload to private object storage, signed downloads, malware scanning and official document checks require configured providers.
+- Audit logs, support tickets, drivers, assignments and maintenance records are persisted. Notification inbox/read endpoints are present; event-driven notification creation and push/email/SMS delivery remain to be wired into all business events.
+- Fixed-precision money fields are used for vehicle rates and booking totals. PostgreSQL migration adds an exclusion constraint to reject overlapping active bookings. SQLite local development does not provide that production concurrency guarantee.
+- Live maps, geocoding, directions, opening hours, full review moderation, full agency/admin workflows, all 100+ planned screens, analytics, monitoring, load testing and production security review remain future work.
+
+See `docs/IMPLEMENTATION_STATUS.md` and `docs/OPERATIONS_API.md` for the exact current boundary. Never treat provider stubs or development OTP codes as production integrations.
+
+
+## Latest continuation update
+
+The web Support page and Expo mobile app now connect to the persisted support-ticket and in-app notification APIs. Signed-in users can create support requests, review ticket status, load notifications and mark notifications as read. See `docs/IMPLEMENTATION_STATUS.md` for implementation boundaries and verification status.

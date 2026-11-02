@@ -1,13 +1,14 @@
-from datetime import date
+from datetime import date, datetime
+import json, uuid
 from decimal import Decimal
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import and_, func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.db import get_db
-from app.models import User, Role, Destination, Itinerary, Vehicle, Booking, Review
-from app.schemas import RegisterIn, LoginIn, VehicleIn, ItineraryIn, BookingIn, BookingStatusIn, ReviewIn
-from app.security import hash_password, verify_password, create_token, current_user, require_roles
+from app.models import User, Role, Destination, Itinerary, Vehicle, Booking, Review, Notification, AuditLog, ProviderProfile, TourPackage, TourPackageRequest
+from app.schemas import RegisterIn, LoginIn, VehicleIn, ItineraryIn, BookingIn, BookingStatusIn, ReviewIn, ProviderProfileIn, TourPackageIn, TourPackageRequestIn, TourPackageRequestUpdateIn
+from app.security import hash_password, verify_password, create_token, current_user, optional_current_user, require_roles
 from app.services.auth import normalize_email, public_user as serialize_user
 from app.services.vehicles import serialize_vehicle
 from app.services.bookings import validate_date_range, quote_vehicle_booking
@@ -74,16 +75,17 @@ def add_destination(data: dict, db: Session = Depends(get_db), _admin: User = De
     return {"id": item.id, "name": item.name}
 
 @api.post("/itineraries", status_code=201, tags=["itineraries"])
-def create_itinerary(data: ItineraryIn, db: Session = Depends(get_db)):
+def create_itinerary(data: ItineraryIn, db: Session = Depends(get_db),
+                     user: User | None = Depends(optional_current_user)):
     item = Itinerary(title=f"{data.origin} to {data.destination}", origin=data.origin,
                      destination=data.destination, start_date=data.start_date, days=data.days,
                      travellers=data.travellers, interests=data.interests,
-                     estimated_budget=data.estimated_budget)
+                     estimated_budget=data.estimated_budget, user_id=user.id if user else None)
     db.add(item); db.commit(); db.refresh(item)
     stops = build_draft_stops(data.days)
     return {"id": item.id, "title": item.title, "origin": item.origin, "destination": item.destination,
             "days": item.days, "travellers": item.travellers, "estimated_budget": item.estimated_budget,
-            "stops": stops, "status": "draft"}
+            "stops": stops, "status": "draft", "owner_id": item.user_id}
 
 @api.get("/itineraries/mine", tags=["itineraries"])
 def my_itineraries(db: Session = Depends(get_db), user: User = Depends(current_user)):
@@ -193,3 +195,49 @@ def admin_overview(db: Session = Depends(get_db), _admin: User = Depends(require
             "vehicles": db.query(Vehicle).count(), "bookings": db.query(Booking).count(),
             "pending_vehicles": db.query(Vehicle).filter(Vehicle.verified.is_(False)).count(),
             "pending_bookings": db.query(Booking).filter(Booking.status == "requested").count()}
+
+
+# Step 64 — customer tour package enquiry and provider request management
+def _tour_request_payload(item: TourPackageRequest, db: Session):
+    package=db.get(TourPackage,item.package_id); customer=db.get(User,item.customer_id)
+    return {"id":item.id,"package_id":item.package_id,"package_title":package.title if package else "Tour package","package_slug":package.slug if package else "","destination":package.destination if package else "","customer_id":item.customer_id,"customer_name":customer.name if customer else "Traveller","customer_email":customer.email if customer else "","provider_id":item.provider_id,"start_date":item.start_date.isoformat(),"travellers":item.travellers,"contact_phone":item.contact_phone,"message":item.message,"status":item.status,"provider_note":item.provider_note,"created_at":item.created_at.isoformat() if item.created_at else None}
+
+@api.post("/tour-packages/{slug}/requests", tags=["tour-package-requests"])
+def create_tour_package_request(slug: str, data: TourPackageRequestIn, db: Session=Depends(get_db), user: User=Depends(current_user)):
+    package=db.query(TourPackage).filter(TourPackage.slug==slug,TourPackage.is_published.is_(True)).first()
+    if not package: raise HTTPException(404,"Tour package not found.")
+    if data.start_date < date.today(): raise HTTPException(400,"Choose a future start date.")
+    if data.travellers > package.max_travellers: raise HTTPException(400,f"This package accepts up to {package.max_travellers} travellers.")
+    if package.provider_id==user.id: raise HTTPException(400,"You cannot request your own package.")
+    item=TourPackageRequest(package_id=package.id,customer_id=user.id,provider_id=package.provider_id,start_date=data.start_date,travellers=data.travellers,contact_phone=data.contact_phone.strip(),message=data.message.strip())
+    db.add(item); db.flush()
+    add_preference_notification(db,package.provider_id,"booking_updates","New tour package request",f"{user.name} requested {package.title} for {data.travellers} traveller(s), starting {data.start_date.isoformat()}.")
+    db.add(AuditLog(actor_id=user.id,action="tour_package_request_created",resource_type="tour_package_request",resource_id=item.id,details_json=json.dumps({"package_id":package.id})))
+    db.commit(); db.refresh(item); return _tour_request_payload(item,db)
+
+@api.get("/tour-package-requests/mine", tags=["tour-package-requests"])
+def my_tour_package_requests(db: Session=Depends(get_db),user: User=Depends(current_user)):
+    rows=db.query(TourPackageRequest).filter(TourPackageRequest.customer_id==user.id).order_by(TourPackageRequest.created_at.desc()).all(); return [_tour_request_payload(x,db) for x in rows]
+
+@api.patch("/tour-package-requests/{request_id}/cancel", tags=["tour-package-requests"])
+def cancel_my_tour_package_request(request_id: str,db: Session=Depends(get_db),user: User=Depends(current_user)):
+    item=db.query(TourPackageRequest).filter(TourPackageRequest.id==request_id,TourPackageRequest.customer_id==user.id).first()
+    if not item: raise HTTPException(404,"Tour package request not found.")
+    if item.status not in ("requested","reviewing"): raise HTTPException(400,"This request can no longer be cancelled online.")
+    item.status="cancelled"; db.add(AuditLog(actor_id=user.id,action="tour_package_request_cancelled",resource_type="tour_package_request",resource_id=item.id,details_json="{}")); db.commit(); db.refresh(item); return _tour_request_payload(item,db)
+
+@api.get("/providers/me/tour-package-requests", tags=["tour-package-requests"])
+def provider_tour_package_requests(status: str="",db: Session=Depends(get_db),user: User=Depends(require_roles("agency","owner","admin"))):
+    query=db.query(TourPackageRequest).filter(TourPackageRequest.provider_id==user.id)
+    if status.strip(): query=query.filter(TourPackageRequest.status==status.strip())
+    rows=query.order_by(TourPackageRequest.created_at.desc()).all(); return [_tour_request_payload(x,db) for x in rows]
+
+@api.patch("/providers/me/tour-package-requests/{request_id}", tags=["tour-package-requests"])
+def update_provider_tour_package_request(request_id: str,data: TourPackageRequestUpdateIn,db: Session=Depends(get_db),user: User=Depends(require_roles("agency","owner","admin"))):
+    item=db.query(TourPackageRequest).filter(TourPackageRequest.id==request_id,TourPackageRequest.provider_id==user.id).first()
+    if not item: raise HTTPException(404,"Tour package request not found.")
+    if item.status in ("declined","cancelled"): raise HTTPException(400,"This request is closed.")
+    if item.status=="confirmed" and data.status not in ("confirmed","cancelled"): raise HTTPException(400,"A confirmed request can only remain confirmed or be cancelled.")
+    item.status=data.status; item.provider_note=data.provider_note.strip(); package=db.get(TourPackage,item.package_id)
+    add_preference_notification(db,item.customer_id,"booking_updates","Tour package request updated",f"Your request for {package.title if package else 'a tour package'} is now {item.status}. {item.provider_note}".strip())
+    db.add(AuditLog(actor_id=user.id,action="tour_package_request_updated",resource_type="tour_package_request",resource_id=item.id,details_json=json.dumps({"status":item.status}))); db.commit(); db.refresh(item); return _tour_request_payload(item,db)

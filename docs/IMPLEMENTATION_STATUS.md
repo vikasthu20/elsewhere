@@ -1,20 +1,41 @@
-# Implementation status — 31 October 2026
+# Implementation status — continuation build
 
-## Source included
-- React web app with responsive Elsewhere styling and 15+ routed page surfaces.
-- Expo React Native app with five primary tabs, authentication and trip request flow.
-- FastAPI API with authentication, destinations, itineraries, vehicle listings, booking requests, owner booking updates, reviews, budget estimates and protected admin overview.
-- PostgreSQL/SQLAlchemy models and Alembic migration.
-- Docker Compose, design board asset, seed script, API budget tests and setup/security documentation.
+## Existing application preserved
+- React web application, Expo React Native application and FastAPI API remain the base project.
+- Existing authentication, destination, itinerary, vehicle, booking, review and budget routes are retained.
+- Existing screens and design catalogue are retained; the catalogue is still a roadmap and is not a claim that 100+ screens have been implemented.
 
-## Not implemented / needs integration
-- The full 100+ screen design catalogue is not fully implemented. The catalogue is a roadmap, not a claim that all surfaces are coded.
-- Live maps/geocoding/directions/opening hours, email/SMS OTP, password reset delivery, OAuth, payments/refunds, private uploads/malware scanning and authorised document checks require provider configuration and additional implementation.
-- Full owner/agency/admin operations, audit log persistence, review moderation, notifications, support ticket workflows, vehicle maintenance, driver assignment, refunds and production analytics remain future modules.
-- Database money columns and all booking concurrency controls require production hardening and tests.
+## Added in this continuation
+- Connected the web Support page to the persisted support-ticket and notification APIs. Travellers can submit requests, view their support history, refresh the inbox and mark notifications as read.
+- Added a Support & Updates screen to the Expo mobile app using the same authenticated APIs, including support request creation, ticket history and notification read status.
+- Persisted support tickets with traveller creation/listing and staff/admin queue/update endpoints.
+- Persisted in-app notifications and per-user read status.
+- Owner/agency driver records and booking-to-driver assignment.
+- Vehicle maintenance schedule and service history.
+- Persistent audit event records for the new operational actions.
+- Admin vehicle verification endpoint.
+- OTP challenge generation with hashed codes, expiry and attempt limits; development mode can return a code for local testing. Production SMS/email delivery is not configured.
+- Password reset using a valid OTP challenge.
+- Private-document metadata registration with MIME/extension/size allowlisting. Binary private storage, malware scanning and official document verification are not implemented without provider adapters.
+- Payment intent provider contract and explicit unconfigured-provider response. No live charge or refund is performed until a payment gateway is configured.
+- Refund requests create a support ticket for manual review; they do not transfer money.
+- Monetary columns changed to fixed precision Numeric in the ORM and migration. PostgreSQL migration adds an exclusion constraint to prevent overlapping active bookings for the same vehicle; SQLite does not provide the same concurrency guarantee.
+- Added service tests for money rounding, document allowlisting and OTP hashing.
 
-## Verification performed in this package build
-- Python source compilation is checked during packaging.
-- ZIP integrity is checked after archive creation.
-- Frontend package installation/build could not be confirmed in the packaging environment if npm registry access is unavailable. Run `npm install && npm run build` locally.
-- iOS/Android simulator builds must be run with the Expo toolchain on a configured development machine.
+## Still requiring provider configuration or further implementation
+- Live maps, geocoding, directions, opening hours and place search.
+- Production email/SMS OTP delivery, OAuth providers and password-reset email/SMS delivery.
+- Payment gateway checkout, signed webhooks, captures, settlements and actual refunds.
+- Private object storage, signed download URLs, malware scanner and authorised document verification.
+- Push/email/SMS notification delivery.
+- Full owner/agency/admin dashboards and all 100+ catalogue screens.
+- Advanced analytics, moderation workflows, driver availability calendars and maintenance-based vehicle blocking. Security notification SLA escalation is implemented; its delivery depends on an operations webhook.
+- Production-grade rate limiting, secret management, monitoring, backups, security review and load testing.
+
+## Verification
+- API suite: `pytest -q` from `apps/api` — 40 passed, including existing-database migration recovery and positive/negative expense ownership, amount validation and CORS preflight cases.
+- Web: `npm run build` and `npm run test` from `apps/web` — build passed and 12 tests passed.
+- Mobile: exact dependency pins, `npx tsc --noEmit`, and `npx expo export --platform all` passed. Expo's local dependency check passed; its online version check was unavailable.
+- Migrations: a clean SQLite database upgraded through `0057_email_retry_worker_leases`; PostgreSQL offline SQL generation also completed. A live PostgreSQL upgrade was not run because the Docker daemon is unavailable.
+- Native Android/iOS compilation, live payment/S3/provider integrations, backup restore, monitoring, security review and load testing remain unverified. Payment and S3 actions still require configured providers and credentials.
+- PostgreSQL-only exclusion constraint is installed by migration 0002. Use PostgreSQL for production booking concurrency.

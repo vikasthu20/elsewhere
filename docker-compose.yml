@@ -19,9 +19,22 @@ services:
         required: false
     environment:
       DATABASE_URL: postgresql+psycopg://elsewhere:${POSTGRES_PASSWORD:-change-me-local-only}@db:5432/elsewhere
+      SECURITY_NOTIFICATION_WORKER_IN_PROCESS: "false"
     ports: ["8000:8000"]
     depends_on:
       db: {condition: service_healthy}
+    restart: unless-stopped
+  notification-worker:
+    build: ./apps/api
+    env_file:
+      - path: ./apps/api/.env
+        required: false
+    environment:
+      DATABASE_URL: postgresql+psycopg://elsewhere:${POSTGRES_PASSWORD:-change-me-local-only}@db:5432/elsewhere
+    command: ["python", "scripts/process_security_notifications.py", "--loop", "--interval-seconds", "15"]
+    depends_on:
+      db: {condition: service_healthy}
+    restart: unless-stopped
   web:
     build: ./apps/web
     environment:

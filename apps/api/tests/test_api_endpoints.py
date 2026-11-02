@@ -1,8 +1,10 @@
 import asyncio
 import json
 import unittest
-from datetime import date, timedelta
+from unittest.mock import patch
+from datetime import date, datetime, timedelta
 from urllib.parse import urlparse
+from fastapi import HTTPException
 from sqlalchemy import create_engine
 from sqlalchemy.pool import StaticPool
 from sqlalchemy.orm import sessionmaker
@@ -10,12 +12,15 @@ from sqlalchemy.orm import sessionmaker
 from app.db import Base, get_db
 import app.models as models
 from app.models import Role, User, Destination, Vehicle, Booking
-from app.security import hash_password
+from app.security import hash_password, create_token
 from app.main import app
+from app.core.rate_limit import limiter
 
 class TestApiEndpoints(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        cls.security_event_patcher = patch("app.main.persist_security_event")
+        cls.security_event_patcher.start()
         cls.engine = create_engine(
             "sqlite:///:memory:",
             connect_args={"check_same_thread": False},
@@ -51,6 +56,11 @@ class TestApiEndpoints(unittest.TestCase):
     def tearDownClass(cls):
         Base.metadata.drop_all(bind=cls.engine)
         app.dependency_overrides.clear()
+        cls.security_event_patcher.stop()
+
+    def setUp(self):
+        # Rate-limit state is process-global; reset it so each test starts clean.
+        limiter._events.clear()
 
     def request(self, method: str, path: str, json_data=None, headers=None):
         return asyncio.run(self._asgi_request(method, path, json_data, headers))
@@ -59,7 +69,7 @@ class TestApiEndpoints(unittest.TestCase):
         parsed = urlparse(path)
         path_only = parsed.path
         query_string = parsed.query.encode("utf-8")
-        header_list = []
+        header_list = [(b"host", b"testserver")]
         if headers:
             for k, v in headers.items():
                 header_list.append((k.lower().encode("utf-8"), v.encode("utf-8")))
@@ -259,6 +269,8 @@ class TestApiEndpoints(unittest.TestCase):
             "end_date": end,
             "pickup_location": "Coimbatore Airport"
         }
+        status, _ = self.request("POST", "/api/v1/bookings", booking_payload)
+        self.assertEqual(status, 401)
         status, book_body = self.request(
             "POST",
             "/api/v1/bookings",
@@ -340,6 +352,264 @@ class TestApiEndpoints(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertGreaterEqual(overview["users"], 2)
         self.assertGreaterEqual(overview["destinations"], 1)
+
+    def test_08_itinerary_expense_positive_and_negative_amounts(self):
+        status, registered = self.request("POST", "/api/v1/auth/register", {
+            "name": "Expense Traveller", "email": "expense@example.com",
+            "password": "ExpensePassword123!", "role": "customer"
+        })
+        self.assertEqual(status, 201)
+        headers = {"Authorization": f"Bearer {registered['access_token']}"}
+
+        status, itinerary = self.request("POST", "/api/v1/itineraries", {
+            "origin": "Chennai", "destination": "Pondicherry", "days": 2,
+            "travellers": 1, "estimated_budget": 12000
+        }, headers)
+        self.assertEqual(status, 201)
+        itinerary_id = itinerary["id"]
+
+        status, body = self.request("POST", f"/api/v1/itineraries/{itinerary_id}/expenses", {
+            "date": "2027-02-01", "category": "food", "amount": "125.456",
+            "note": "Lunch"
+        }, headers)
+        self.assertEqual(status, 201)
+        self.assertEqual(len(body["expenses"]), 1)
+        expense = body["expenses"][0]
+        self.assertEqual(expense["amount"], 125.46)
+        self.assertEqual(expense["category"], "food")
+        status, body = self.request("GET", f"/api/v1/itineraries/{itinerary_id}/expenses", headers=headers)
+        self.assertEqual(status, 200)
+        self.assertEqual(body["expenses"][0]["id"], expense["id"])
+
+        for amount in (0, -1, "not-a-number", None):
+            with self.subTest(amount=amount):
+                status, body = self.request("POST", f"/api/v1/itineraries/{itinerary_id}/expenses", {
+                    "amount": amount
+                }, headers)
+                self.assertEqual(status, 400)
+                self.assertEqual(body["detail"], "Enter an amount greater than zero.")
+
+        status, body = self.request("DELETE", f"/api/v1/itineraries/{itinerary_id}/expenses/{expense['id']}",
+                                    headers=headers)
+        self.assertEqual(status, 200)
+        self.assertEqual(body["expenses"], [])
+
+        status, body = self.request("DELETE", f"/api/v1/itineraries/{itinerary_id}/expenses/missing",
+                                    headers=headers)
+        self.assertEqual(status, 404)
+
+    def test_09_itinerary_expenses_require_auth_and_owner(self):
+        status, owner = self.request("POST", "/api/v1/auth/register", {
+            "name": "Itinerary Owner", "email": "itinerary-owner@example.com",
+            "password": "OwnerPassword123!", "role": "customer"
+        })
+        self.assertEqual(status, 201)
+        owner_headers = {"Authorization": f"Bearer {owner['access_token']}"}
+        status, itinerary = self.request("POST", "/api/v1/itineraries", {
+            "origin": "Chennai", "destination": "Pondicherry", "days": 1,
+            "travellers": 1
+        }, owner_headers)
+        self.assertEqual(status, 201)
+        itinerary_id = itinerary["id"]
+
+        status, body = self.request("GET", f"/api/v1/itineraries/{itinerary_id}/expenses")
+        self.assertEqual(status, 401)
+        status, body = self.request("POST", f"/api/v1/itineraries/{itinerary_id}/expenses", {
+            "date": "2027-02-01", "category": "food", "amount": 125, "note": "Lunch"
+        })
+        self.assertEqual(status, 401)
+        status, body = self.request("GET", f"/api/v1/itineraries/{itinerary_id}/expenses",
+                                    headers={"Authorization": "Bearer invalid-token"})
+        self.assertEqual(status, 401)
+        status, body = self.request("POST", f"/api/v1/itineraries/{itinerary_id}/expenses", {
+            "amount": 125
+        }, {"Authorization": "Bearer invalid-token"})
+        self.assertEqual(status, 401)
+
+        status, other = self.request("POST", "/api/v1/auth/register", {
+            "name": "Different Traveller", "email": "different-traveller@example.com",
+            "password": "DifferentPassword123!", "role": "customer"
+        })
+        self.assertEqual(status, 201)
+        headers = {"Authorization": f"Bearer {other['access_token']}"}
+        status, body = self.request("GET", f"/api/v1/itineraries/{itinerary_id}/expenses", headers=headers)
+        self.assertEqual(status, 404)
+        self.assertEqual(body["detail"], "Itinerary not found")
+
+        # A public draft has no owner; signing in later cannot claim it by ID.
+        status, public_draft = self.request("POST", "/api/v1/itineraries", {
+            "origin": "Madurai", "destination": "Rameswaram", "days": 2,
+            "travellers": 2
+        })
+        self.assertEqual(status, 201)
+        status, body = self.request("GET",
+                                    f"/api/v1/itineraries/{public_draft['id']}/expenses",
+                                    headers=headers)
+        self.assertEqual(status, 404)
+
+    def test_10_editorial_content_public_get_and_admin_create(self):
+        db = self.Session()
+        admin_token = create_token(db.get(User, "admin-1"))
+        db.close()
+        admin_headers = {"Authorization": f"Bearer {admin_token}"}
+        status, body = self.request("POST", "/api/v1/admin/content", {
+            "title": "Hidden guide", "slug": "hidden-guide", "is_published": False
+        }, admin_headers)
+        self.assertEqual(status, 201)
+        content_id = body["id"]
+        status, body = self.request("GET", "/api/v1/content")
+        self.assertEqual(status, 200)
+        self.assertEqual(body, [])
+        status, body = self.request("GET", "/api/v1/content/hidden-guide")
+        self.assertEqual(status, 404)
+
+        status, body = self.request("PATCH", f"/api/v1/admin/content/{content_id}", {
+            "is_published": True
+        }, admin_headers)
+        self.assertEqual(status, 200)
+        status, body = self.request("GET", "/api/v1/content?content_type=guide")
+        self.assertEqual(status, 200)
+        self.assertEqual(body[0]["slug"], "hidden-guide")
+        status, body = self.request("GET", "/api/v1/content/hidden-guide")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["title"], "Hidden guide")
+
+    def test_11_admin_content_post_requires_admin(self):
+        status, body = self.request("POST", "/api/v1/admin/content", {
+            "title": "Unauthorised", "slug": "unauthorised"
+        })
+        self.assertEqual(status, 401)
+
+    def test_12_vehicle_availability_positive_and_negative(self):
+        status, owner = self.request("POST", "/api/v1/auth/register", {
+            "name": "Availability Owner", "email": "availability-owner@example.com",
+            "password": "AvailabilityPassword123!", "role": "owner"
+        })
+        self.assertEqual(status, 201)
+        owner_headers = {"Authorization": f"Bearer {owner['access_token']}"}
+        status, vehicle = self.request("POST", "/api/v1/vehicles", {
+            "title": "Availability car", "category": "Sedan", "price_per_day": 100,
+            "city": "Chennai"
+        }, owner_headers)
+        self.assertEqual(status, 201)
+        db = self.Session()
+        db.get(Vehicle, vehicle["id"]).verified = True
+        db.commit()
+        db.close()
+        status, result = self.request("GET", f"/api/v1/vehicles/{vehicle['id']}/availability?start_date=2026-11-03&end_date=2026-11-12")
+        self.assertEqual(status, 200)
+        self.assertTrue(result["available"])
+        self.assertEqual(result["unavailable"], [])
+        status, result = self.request("GET", f"/api/v1/vehicles/{vehicle['id']}/availability?start_date=2026-11-12&end_date=2026-11-03")
+        self.assertEqual(status, 422)
+        status, result = self.request("GET", "/api/v1/vehicles/missing/availability?start_date=2026-11-03&end_date=2026-11-12")
+        self.assertEqual(status, 404)
+
+    def test_13_cors_allows_configured_web_origin_and_rejects_other_origins(self):
+        preflight = {
+            "Origin": "http://localhost:5173",
+            "Access-Control-Request-Method": "GET",
+            "Access-Control-Request-Headers": "authorization,content-type",
+        }
+        status, _ = self.request("OPTIONS", "/api/v1/itineraries/mine", headers=preflight)
+        self.assertEqual(status, 200)
+
+        loopback = {**preflight, "Origin": "http://127.0.0.1:5173"}
+        status, _ = self.request("OPTIONS", "/api/v1/itineraries/mine", headers=loopback)
+        self.assertEqual(status, 200)
+
+        disallowed = {**preflight, "Origin": "http://untrusted.example"}
+        status, _ = self.request("OPTIONS", "/api/v1/itineraries/mine", headers=disallowed)
+        self.assertEqual(status, 400)
+
+    def test_14_notification_unread_count_auth_and_read_filter(self):
+        status, registered = self.request("POST", "/api/v1/auth/register", {
+            "name": "Notification Reader", "email": "notification-reader@example.com",
+            "password": "NotificationPassword123!", "role": "customer"
+        })
+        self.assertEqual(status, 201)
+        headers = {"Authorization": f"Bearer {registered['access_token']}"}
+        status, body = self.request("GET", "/api/v1/notifications/unread-count")
+        self.assertEqual(status, 401)
+        status, body = self.request("GET", "/api/v1/notifications/unread-count", headers=headers)
+        self.assertEqual(status, 200)
+        self.assertEqual(body["unread_count"], 0)
+        db = self.Session()
+        db.add_all([
+            models.Notification(user_id=registered["user"]["id"], title="Unread", body="One"),
+            models.Notification(user_id=registered["user"]["id"], title="Read", body="Two",
+                                read_at=datetime.utcnow()),
+        ])
+        db.commit()
+        db.close()
+        status, body = self.request("GET", "/api/v1/notifications/unread-count", headers=headers)
+        self.assertEqual(status, 200)
+        self.assertEqual(body["unread_count"], 1)
+
+    def test_15_email_verification_console_mode_and_invalid_code(self):
+        status, registered = self.request("POST", "/api/v1/auth/register", {
+            "name": "Verify Email", "email": "verify-email@example.com",
+            "password": "VerifyPassword123!", "role": "customer"
+        })
+        self.assertEqual(status, 201)
+        headers = {"Authorization": f"Bearer {registered['access_token']}"}
+        with patch("app.routers.auth.settings.otp_delivery_mode", "console"), \
+                patch("app.routers.auth._send_security_code", side_effect=AssertionError("SMTP must not be used in console mode")):
+            status, challenge = self.request("POST", "/api/v1/auth/email-verification/request", headers=headers)
+        self.assertEqual(status, 200)
+        code = challenge["development_code"]
+        self.assertRegex(code, r"^[0-9]{6}$")
+        invalid_code = "000000" if code != "000000" else "000001"
+        status, _ = self.request("POST", "/api/v1/auth/email-verification/confirm",
+                                 {"code": invalid_code}, headers)
+        self.assertEqual(status, 400)
+        status, result = self.request("POST", "/api/v1/auth/email-verification/confirm",
+                                      {"code": code}, headers)
+        self.assertEqual(status, 200)
+        self.assertTrue(result["user"]["email_verified"])
+        status, registered = self.request("POST", "/api/v1/auth/register", {
+            "name": "SMTP Missing", "email": "smtp-missing@example.com",
+            "password": "VerifyPassword123!", "role": "customer"
+        })
+        self.assertEqual(status, 201)
+        with patch("app.routers.auth.settings.otp_delivery_mode", "email"), \
+                patch("app.routers.auth._send_security_code", side_effect=HTTPException(503, "SMTP unavailable")):
+            status, _ = self.request("POST", "/api/v1/auth/email-verification/request",
+                                     headers={"Authorization": f"Bearer {registered['access_token']}"})
+        self.assertEqual(status, 503)
+
+    def test_16_itinerary_budget_patch_auth_ownership_and_validation(self):
+        status, owner = self.request("POST", "/api/v1/auth/register", {
+            "name": "Budget Owner", "email": "budget-owner@example.com",
+            "password": "BudgetPassword123!", "role": "customer"
+        })
+        self.assertEqual(status, 201)
+        owner_headers = {"Authorization": f"Bearer {owner['access_token']}"}
+        status, itinerary = self.request("POST", "/api/v1/itineraries", {
+            "origin": "Chennai", "destination": "Pondicherry", "days": 2,
+            "travellers": 2
+        }, owner_headers)
+        self.assertEqual(status, 201)
+        path = f"/api/v1/itineraries/{itinerary['id']}/budget"
+        payload = {"currency": "inr", "accommodation": 2500, "food": 500,
+                   "transport": 0, "activities": 125.456, "other": 0,
+                   "notes": "First estimate", "alert_threshold": 80}
+        status, _ = self.request("PATCH", path, payload)
+        self.assertEqual(status, 401)
+        status, body = self.request("PATCH", path, payload, owner_headers)
+        self.assertEqual(status, 200)
+        self.assertEqual(body["budget"]["currency"], "INR")
+        self.assertEqual(body["budget"]["activities"], 125.46)
+        status, _ = self.request("PATCH", path, {**payload, "food": -1}, owner_headers)
+        self.assertEqual(status, 422)
+        status, other = self.request("POST", "/api/v1/auth/register", {
+            "name": "Other Owner", "email": "budget-other@example.com",
+            "password": "OtherPassword123!", "role": "customer"
+        })
+        self.assertEqual(status, 201)
+        status, _ = self.request("PATCH", path, payload,
+                                 {"Authorization": f"Bearer {other['access_token']}"})
+        self.assertEqual(status, 404)
 
 if __name__ == "__main__":
     unittest.main()

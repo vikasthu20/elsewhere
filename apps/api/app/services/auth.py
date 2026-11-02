@@ -4,4 +4,5 @@ def normalize_email(email: str) -> str:
 
 def public_user(user):
     return {"id":user.id,"name":user.name,"email":user.email,
-            "phone":user.phone,"role":user.role.value}
+            "phone":user.phone,"role":user.role.value,
+            "email_verified":user.email_verified}

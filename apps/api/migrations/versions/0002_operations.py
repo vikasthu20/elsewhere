@@ -79,7 +79,27 @@ def upgrade():
         sa.Column("verification_status", sa.String(24), nullable=False, server_default="pending"),
         sa.Column("created_at", sa.DateTime(), nullable=False))
 
+    with op.batch_alter_table("vehicles") as batch:
+        batch.alter_column("price_per_day", existing_type=sa.Float(), type_=sa.Numeric(12, 2), existing_nullable=False)
+    with op.batch_alter_table("bookings") as batch:
+        batch.alter_column("total_amount", existing_type=sa.Float(), type_=sa.Numeric(12, 2), existing_nullable=False)
+
+    bind = op.get_bind()
+    if bind.dialect.name == "postgresql":
+        op.execute("CREATE EXTENSION IF NOT EXISTS btree_gist")
+        op.execute("""
+            ALTER TABLE bookings ADD CONSTRAINT ex_bookings_vehicle_active_dates
+            EXCLUDE USING gist (
+                vehicle_id WITH =,
+                daterange(start_date, end_date, '[]') WITH &&
+            ) WHERE (status NOT IN ('cancelled', 'rejected', 'declined'))
+        """)
+
 def downgrade():
+    bind = op.get_bind()
+    if bind.dialect.name == "postgresql":
+        op.execute("ALTER TABLE bookings DROP CONSTRAINT IF EXISTS ex_bookings_vehicle_active_dates")
+
     for table in ("private_documents", "otp_challenges", "payment_records", "vehicle_maintenance",
                   "driver_assignments", "drivers", "notifications", "support_tickets", "audit_logs"):
         op.drop_table(table)
