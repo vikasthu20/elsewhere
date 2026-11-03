@@ -793,3 +793,51 @@ body select:not([multiple]):hover:not(:disabled){border-color:#9eaa9d;background
 body select:not([multiple]):focus-visible{outline:0;border-color:#58745b;box-shadow:0 0 0 3px #58745b24}
 body select:not([multiple]):disabled{opacity:.58;cursor:not-allowed;background-color:#f1efe9}
 body select:not([multiple]) option{background:#fffefa;color:#242820}
+
+/* Shared UI refinement: clearer interaction states, calmer surfaces and a header
+   that stays usable before the compact mobile layout kicks in. */
+:root{--focus-ring:0 0 0 3px #58745b2e;--surface-raised:#fffefa}
+html{scroll-padding-top:88px}
+body{line-height:1.5;-webkit-font-smoothing:antialiased}
+::selection{background:#cbd8c8;color:#173f36}
+a,button,input,select,textarea{ -webkit-tap-highlight-color:transparent }
+a:focus-visible,button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:0;box-shadow:var(--focus-ring)}
+.desktop-nav a{position:relative;display:inline-flex;align-items:center;min-height:42px;white-space:nowrap;transition:color .16s ease}
+.desktop-nav a.active{color:var(--deep);font-weight:800}
+.desktop-nav a.active::after{position:absolute;right:0;bottom:4px;left:0;height:2px;border-radius:2px;background:#58745b;content:''}
+.button{min-height:44px;border-radius:8px;box-shadow:0 2px 5px #153a3210}
+.button:active{transform:translateY(0)}
+.destination-card,.form-card,.detail-aside,.planner-form,.itinerary-result,.booking-form{border:1px solid #ded7ca80}
+.searchbox:focus-within,.input-icon:focus-within{border-color:var(--green);box-shadow:var(--focus-ring)}
+input::placeholder,textarea::placeholder{color:#85847b;opacity:1}
+table{border-collapse:collapse}
+.table-wrap{border-radius:9px}
+@media(max-width:1120px){
+  .site-header{height:68px;padding-inline:22px;gap:18px}
+  .site-header .wordmark{font-size:32px;flex:none}
+  .desktop-nav,.site-header .header-actions{display:none}
+  .mobile-menu{display:grid;place-items:center;width:42px;height:42px;margin-left:auto;border:1px solid var(--line);border-radius:9px;background:var(--surface);color:var(--deep)}
+  .mobile-menu-panel{display:flex;position:absolute;top:100%;left:0;right:0;max-height:calc(100vh - 68px);overflow:auto;padding:10px 22px 18px;background:var(--surface);border-bottom:1px solid var(--line);box-shadow:0 14px 25px #24282012;flex-direction:column;gap:0}
+  .mobile-menu-panel a{min-height:46px;padding:12px 3px;border-bottom:1px solid var(--line);font-size:12px;color:var(--ink)}
+  .mobile-menu-panel a:last-child{border-bottom:0}
+  .mobile-menu-panel .header-notification-link{justify-content:flex-start}
+  .home-discovery-hero{padding-top:54px}
+  .home-search-fields{grid-template-columns:1fr 1fr .75fr auto}
+  .destination-grid,.listing-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .destination-card.feature-card{grid-row:span 2}
+  .destination-card.feature-card img{height:calc(100% - 110px);min-height:280px}
+}
+@media(max-width:680px){
+  html{scroll-padding-top:72px}
+  .site-header{padding-inline:18px}
+  .destination-grid,.listing-grid{grid-template-columns:1fr}
+  .destination-card.feature-card{grid-row:auto}
+  .destination-card.feature-card img{height:220px;min-height:0}
+  .home-search-fields{grid-template-columns:1fr}
+  .home-search-fields .button{grid-column:auto}
+  .mobile-menu-panel{padding-inline:20px}
+  .mobile-tabbar{padding-bottom:max(env(safe-area-inset-bottom),4px);height:calc(62px + env(safe-area-inset-bottom))}
+  body:has(.mobile-tabbar){padding-bottom:calc(62px + env(safe-area-inset-bottom))}
+}
+@media(min-width:681px) and (max-width:800px){.home-search-fields{grid-template-columns:1fr 1fr}.home-search-fields .button{grid-column:1/-1}}
+@media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}.destination-card,.editorial-card,.homepage-editorial-card,.button{transition:none}}
