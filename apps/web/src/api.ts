@@ -6,6 +6,11 @@ export async function api<T = any>(path: string, options: RequestInit = {}): Pro
   if (token()) headers.set('Authorization', `Bearer ${token()}`);
   const response = await fetch(`${BASE}${path}`, { ...options, headers });
   const payload = await response.json().catch(() => ({}));
+  if (response.status === 401 && token() && typeof window !== 'undefined') {
+    localStorage.removeItem('elsewhere_token');
+    localStorage.removeItem('elsewhere_user');
+    window.dispatchEvent(new Event('elsewhere-auth-changed'));
+  }
   if (!response.ok) throw new Error(payload.detail || `Request failed (${response.status})`);
   return payload as T;
 }

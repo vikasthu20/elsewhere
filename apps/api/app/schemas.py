@@ -1,7 +1,7 @@
 from datetime import date
 from decimal import Decimal
 from typing import Optional
-from pydantic import BaseModel, EmailStr, Field, ConfigDict
+from pydantic import BaseModel, EmailStr, Field, ConfigDict, field_validator
 
 class RegisterIn(BaseModel):
     name: str = Field(min_length=2, max_length=120)
@@ -81,6 +81,11 @@ class SupportTicketIn(BaseModel):
     subject: str = Field(min_length=4, max_length=180)
     message: str = Field(min_length=10, max_length=10000)
     priority: str = Field(default="normal", pattern="^(low|normal|high|urgent)$")
+
+    @field_validator("subject", "message", mode="before")
+    @classmethod
+    def trim_text(cls, value):
+        return value.strip() if isinstance(value, str) else value
 
 class TicketUpdateIn(BaseModel):
     status: str = Field(pattern="^(open|in_progress|waiting_customer|resolved|closed)$")

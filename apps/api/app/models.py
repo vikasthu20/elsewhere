@@ -100,6 +100,18 @@ class Booking(Base):
     total_amount: Mapped[float]=mapped_column(Numeric(12, 2))
     status: Mapped[str]=mapped_column(String(30),default="requested")
     created_at: Mapped[datetime]=mapped_column(DateTime,default=datetime.utcnow)
+
+class RefundRequest(Base):
+    __tablename__ = "refund_requests"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    booking_id: Mapped[str] = mapped_column(ForeignKey("bookings.id"), index=True)
+    customer_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    reason: Mapped[str] = mapped_column(Text)
+    amount: Mapped[float] = mapped_column(Numeric(12, 2), default=0, nullable=False)
+    status: Mapped[str] = mapped_column(String(24), default="pending", index=True)
+    decision_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 class Review(Base):
     __tablename__="reviews"
     __table_args__=(UniqueConstraint("booking_id",name="uq_review_booking"),)
@@ -270,18 +282,22 @@ class ProviderProfile(Base):
 class TourPackage(Base):
     __tablename__ = "tour_packages"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uid)
+    slug: Mapped[str] = mapped_column(String(220), unique=True, index=True, default=uid)
     provider_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
     title: Mapped[str] = mapped_column(String(180))
+    summary: Mapped[str] = mapped_column(String(500), default="", nullable=False)
     description: Mapped[str] = mapped_column(Text, default="")
     destination: Mapped[str] = mapped_column(String(180), default="", index=True)
     duration_days: Mapped[int] = mapped_column(Integer, default=1)
     price_per_person: Mapped[float] = mapped_column(Numeric(12, 2), default=0)
+    currency: Mapped[str] = mapped_column(String(3), default="INR", nullable=False)
     max_travellers: Mapped[int] = mapped_column(Integer, default=10)
     inclusions: Mapped[str] = mapped_column(Text, default="")
     exclusions: Mapped[str] = mapped_column(Text, default="")
     itinerary_json: Mapped[str] = mapped_column(Text, default="[]")
     image_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     status: Mapped[str] = mapped_column(String(24), default="draft", index=True)
+    is_published: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 

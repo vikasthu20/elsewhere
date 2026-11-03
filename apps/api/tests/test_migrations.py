@@ -48,7 +48,7 @@ class TestExistingDatabaseUpgrade(unittest.TestCase):
                 self.assertIn("expenses_json", itinerary_columns)
                 self.assertIn("receipts_json", itinerary_columns)
                 self.assertIn("ix_webhook_subscriptions_active", webhook_indexes)
-                self.assertEqual(revision, "0057_email_retry_worker_leases")
+                self.assertEqual(revision, "0059_tour_package_catalog_fields")
             finally:
                 settings.database_url = previous_url
 

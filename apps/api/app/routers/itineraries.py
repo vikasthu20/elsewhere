@@ -1,5 +1,6 @@
 import json
 import math
+import secrets
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pathlib import Path
@@ -13,6 +14,76 @@ from app.services import itinerary_expenses as expenses
 router = APIRouter()
 router.add_api_route('/itineraries', create_itinerary, methods=['POST'], status_code=201, tags=['itineraries'])
 router.add_api_route('/itineraries/mine', my_itineraries, methods=['GET'], tags=['itineraries'])
+
+def _itinerary_payload(item: Itinerary):
+    try: stops = json.loads(item.stops_json or '[]')
+    except (TypeError, ValueError): stops = []
+    try: budget = json.loads(item.budget_json or '{}')
+    except (TypeError, ValueError): budget = {}
+    return {"id": item.id, "title": item.title, "origin": item.origin,
+            "destination": item.destination, "start_date": item.start_date.isoformat() if item.start_date else None,
+            "days": item.days, "travellers": item.travellers, "interests": item.interests,
+            "estimated_budget": item.estimated_budget, "stops": stops, "budget": budget,
+            "owner_id": item.user_id, "status": "draft"}
+
+@router.get('/itineraries/{itinerary_id}', tags=['itineraries'])
+def get_itinerary(itinerary_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    return _itinerary_payload(_itinerary(itinerary_id, db, user))
+
+@router.delete('/itineraries/{itinerary_id}', tags=['itineraries'])
+def delete_itinerary(itinerary_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    item = _itinerary(itinerary_id, db, user)
+    db.delete(item); db.commit()
+    return {"id": itinerary_id, "deleted": True}
+
+@router.post('/itineraries/{itinerary_id}/share', tags=['itineraries'])
+def enable_itinerary_share(itinerary_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    item = _itinerary(itinerary_id, db, user)
+    if not item.share_token: item.share_token = secrets.token_urlsafe(32)
+    item.share_enabled = True; db.commit()
+    return {"share_path": f"/shared-itineraries/{item.share_token}", "enabled": True}
+
+@router.delete('/itineraries/{itinerary_id}/share', tags=['itineraries'])
+def disable_itinerary_share(itinerary_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    item = _itinerary(itinerary_id, db, user)
+    item.share_enabled = False; db.commit()
+    return {"id": item.id, "enabled": False}
+
+@router.get('/shared-itineraries/{share_token}', tags=['itineraries'])
+def get_shared_itinerary(share_token: str, db: Session = Depends(get_db)):
+    item = db.query(Itinerary).filter(Itinerary.share_token == share_token,
+                                      Itinerary.share_enabled.is_(True)).first()
+    if not item: raise HTTPException(404, "Shared itinerary not found")
+    return _itinerary_payload(item)
+
+
+@router.patch('/itineraries/{itinerary_id}/stops', tags=['itineraries'])
+def update_itinerary_stops(itinerary_id: str, data: dict, db: Session = Depends(get_db),
+                           user: User = Depends(current_user)):
+    item = _itinerary(itinerary_id, db, user)
+    stops = data.get("stops")
+    if not isinstance(stops, list) or len(stops) > 200:
+        raise HTTPException(422, "Stops must be a list containing at most 200 items")
+    normalized = []
+    for index, stop in enumerate(stops):
+        if not isinstance(stop, dict):
+            raise HTTPException(422, f"Stop {index + 1} must be an object")
+        try:
+            day = int(stop.get("day", index + 1))
+        except (TypeError, ValueError):
+            raise HTTPException(422, f"Stop {index + 1} must have a valid day")
+        title = str(stop.get("title") or stop.get("name") or "").strip()
+        detail = str(stop.get("detail") or stop.get("description") or "").strip()
+        if day < 1 or day > item.days:
+            raise HTTPException(422, f"Stop {index + 1} day must be between 1 and {item.days}")
+        if not title or len(title) > 180:
+            raise HTTPException(422, f"Stop {index + 1} title is required and must be 180 characters or fewer")
+        if len(detail) > 2000:
+            raise HTTPException(422, f"Stop {index + 1} detail must be 2000 characters or fewer")
+        normalized.append({"day": day, "title": title, "detail": detail})
+    item.stops_json = json.dumps(normalized)
+    db.commit()
+    return {"stops": normalized}
 
 
 @router.patch('/itineraries/{itinerary_id}/budget', tags=['itineraries'])

@@ -282,6 +282,28 @@ class TestApiEndpoints(unittest.TestCase):
         self.assertEqual(book_body["total_amount"], 3500.0 * 3)
         booking_id = book_body["id"]
 
+        # Payment intent endpoint must exist, enforce ownership, and never imply
+        # that a charge was made when the gateway is not configured.
+        payment_path = f"/api/v1/bookings/{booking_id}/payment-intent?idempotency_key=test-payment-{booking_id}"
+        status, _ = self.request("POST", payment_path)
+        self.assertEqual(status, 401)
+        status, payment_error = self.request(
+            "POST", payment_path, headers={"Authorization": f"Bearer {cust_token}"}
+        )
+        self.assertEqual(status, 503)
+        self.assertIn("no payment has been attempted", payment_error["detail"])
+
+        # A different authenticated customer cannot create a payment intent.
+        _, other_customer = self.request("POST", "/api/v1/auth/register", {
+            "name": "Other Traveller", "email": "other-traveller@example.com",
+            "password": "OtherPassword123!", "role": "customer"
+        })
+        status, _ = self.request(
+            "POST", payment_path,
+            headers={"Authorization": f"Bearer {other_customer['access_token']}"}
+        )
+        self.assertEqual(status, 404)
+
         # 7. Overlapping booking rejection
         status, conflict = self.request(
             "POST",
@@ -610,6 +632,297 @@ class TestApiEndpoints(unittest.TestCase):
         status, _ = self.request("PATCH", path, payload,
                                  {"Authorization": f"Bearer {other['access_token']}"})
         self.assertEqual(status, 404)
+
+    def test_17_itinerary_stops_patch_auth_ownership_and_validation(self):
+        status, owner = self.request("POST", "/api/v1/auth/register", {
+            "name": "Stops Owner", "email": "stops-owner@example.com",
+            "password": "StopsPassword123!", "role": "customer"
+        })
+        self.assertEqual(status, 201)
+        owner_headers = {"Authorization": f"Bearer {owner['access_token']}"}
+        status, itinerary = self.request("POST", "/api/v1/itineraries", {
+            "origin": "Chennai", "destination": "Pondicherry", "days": 2,
+            "travellers": 2
+        }, owner_headers)
+        self.assertEqual(status, 201)
+        path = f"/api/v1/itineraries/{itinerary['id']}/stops"
+        stops = [{"day": 1, "title": "Promenade", "detail": "Visit the waterfront"},
+                 {"day": 2, "title": "Auroville", "detail": "Check visiting hours"}]
+        status, _ = self.request("PATCH", path, {"stops": stops})
+        self.assertEqual(status, 401)
+        status, body = self.request("PATCH", path, {"stops": stops}, owner_headers)
+        self.assertEqual(status, 200)
+        self.assertEqual(body["stops"], stops)
+        status, _ = self.request("PATCH", path, {"stops": [{"day": 3, "title": "Outside trip"}]}, owner_headers)
+        self.assertEqual(status, 422)
+        status, other = self.request("POST", "/api/v1/auth/register", {
+            "name": "Stops Other", "email": "stops-other@example.com",
+            "password": "OtherPassword123!", "role": "customer"
+        })
+        self.assertEqual(status, 201)
+        status, _ = self.request("PATCH", path, {"stops": stops},
+                                 {"Authorization": f"Bearer {other['access_token']}"})
+        self.assertEqual(status, 404)
+
+    def test_18_notification_preferences_and_email_history(self):
+        status, registered = self.request("POST", "/api/v1/auth/register", {
+            "name": "Preference User", "email": "preference-user@example.com",
+            "password": "PreferencePassword123!", "role": "customer"
+        })
+        self.assertEqual(status, 201)
+        headers = {"Authorization": f"Bearer {registered['access_token']}"}
+
+        for path in ("/api/v1/notifications/preferences", "/api/v1/notifications/email-deliveries"):
+            status, _ = self.request("GET", path)
+            self.assertEqual(status, 401)
+
+        status, defaults = self.request("GET", "/api/v1/notifications/preferences", headers=headers)
+        self.assertEqual(status, 200)
+        self.assertEqual(defaults["booking_updates"], True)
+        self.assertEqual(defaults["marketing_updates"], False)
+        status, saved = self.request("PUT", "/api/v1/notifications/preferences", {
+            "booking_updates": False, "payment_updates": True, "trip_budget_alerts": False,
+            "support_updates": True, "marketing_updates": True, "email_enabled": True
+        }, headers)
+        self.assertEqual(status, 200)
+        self.assertEqual(saved["booking_updates"], False)
+        self.assertEqual(saved["email_enabled"], True)
+        status, persisted = self.request("GET", "/api/v1/notifications/preferences", headers=headers)
+        self.assertEqual(status, 200)
+        self.assertEqual(persisted["trip_budget_alerts"], False)
+        status, echoed = self.request("PUT", "/api/v1/notifications/preferences", persisted, headers)
+        self.assertEqual(status, 200)
+        self.assertEqual(echoed["email_enabled"], True)
+        status, _ = self.request("PUT", "/api/v1/notifications/preferences", {
+            "booking_updates": "not-a-boolean"
+        }, headers)
+        self.assertEqual(status, 422)
+
+        db = self.Session()
+        user_id = registered["user"]["id"]
+        db.add(models.NotificationEmailLog(
+            user_id=user_id, recipient_email="preference-user@example.com", subject="Booking update",
+            category="booking_updates", status="sent", email_body="private email content"
+        ))
+        db.add(models.NotificationEmailLog(
+            user_id="admin-1", recipient_email="admin@elsewhere.com", subject="Private admin mail",
+            category="security", status="sent"
+        ))
+        db.commit()
+        db.close()
+        status, deliveries = self.request("GET", "/api/v1/notifications/email-deliveries", headers=headers)
+        self.assertEqual(status, 200)
+        self.assertEqual(len(deliveries["items"]), 1)
+        self.assertEqual(deliveries["items"][0]["subject"], "Booking update")
+        self.assertNotIn("email_body", deliveries["items"][0])
+
+    def test_19_notifications_mine_requires_auth_and_returns_only_callers_notifications(self):
+        _, first = self.request("POST", "/api/v1/auth/register", {
+            "name": "Inbox Owner", "email": "inbox-owner@example.com",
+            "password": "InboxPassword123!", "role": "customer"
+        })
+        _, second = self.request("POST", "/api/v1/auth/register", {
+            "name": "Other Inbox", "email": "other-inbox@example.com",
+            "password": "OtherInboxPassword123!", "role": "customer"
+        })
+        first_headers = {"Authorization": f"Bearer {first['access_token']}"}
+        second_headers = {"Authorization": f"Bearer {second['access_token']}"}
+        status, _ = self.request("GET", "/api/v1/notifications/mine")
+        self.assertEqual(status, 401)
+
+        db = self.Session()
+        db.add_all([
+            models.Notification(user_id=first["user"]["id"], title="My booking", body="Confirmed"),
+            models.Notification(user_id=second["user"]["id"], title="Private update", body="Not yours"),
+        ])
+        db.commit()
+        db.close()
+
+        status, first_notifications = self.request("GET", "/api/v1/notifications/mine", headers=first_headers)
+        self.assertEqual(status, 200)
+        self.assertEqual([n["title"] for n in first_notifications], ["My booking"])
+        status, second_notifications = self.request("GET", "/api/v1/notifications/mine", headers=second_headers)
+        self.assertEqual(status, 200)
+        self.assertEqual([n["title"] for n in second_notifications], ["Private update"])
+
+    def test_20_support_ticket_create_validation_and_trim(self):
+        _, registered = self.request("POST", "/api/v1/auth/register", {
+            "name": "Support Customer", "email": "support-customer@example.com",
+            "password": "SupportPassword123!", "role": "customer"
+        })
+        headers = {"Authorization": f"Bearer {registered['access_token']}"}
+        payload = {"subject": "  Booking help  ", "message": "  I need help with my booking.  ", "priority": "normal"}
+        status, _ = self.request("POST", "/api/v1/support/tickets", payload)
+        self.assertEqual(status, 401)
+        status, created = self.request("POST", "/api/v1/support/tickets", payload, headers)
+        self.assertEqual(status, 201)
+        self.assertEqual(created["status"], "open")
+        status, mine = self.request("GET", "/api/v1/support/tickets/mine", headers=headers)
+        self.assertEqual(status, 200)
+        self.assertEqual(mine[0]["subject"], "Booking help")
+        self.assertEqual(mine[0]["priority"], "normal")
+
+        for invalid in (
+            {"subject": "abc", "message": "This message is long enough", "priority": "normal"},
+            {"subject": "Valid subject", "message": "short", "priority": "normal"},
+            {"subject": "Valid subject", "message": "This message is long enough", "priority": "immediate"},
+            {"subject": "    ", "message": "This message is long enough", "priority": "normal"},
+        ):
+            status, _ = self.request("POST", "/api/v1/support/tickets", invalid, headers)
+            self.assertEqual(status, 422)
+
+    def test_21_itinerary_detail_share_and_owner_management_endpoints(self):
+        status, registered = self.request("POST", "/api/v1/auth/register", {
+            "name": "Itinerary Share Owner", "email": "itinerary-share-owner@example.com",
+            "password": "ItineraryPassword123!", "role": "customer"
+        })
+        self.assertEqual(status, 201, registered)
+        headers = {"Authorization": f"Bearer {registered['access_token']}"}
+        _, itinerary = self.request("POST", "/api/v1/itineraries", {
+            "origin": "Chennai", "destination": "Pondicherry", "days": 2, "travellers": 2
+        }, headers)
+        itinerary_id = itinerary["id"]
+        status, detail = self.request("GET", f"/api/v1/itineraries/{itinerary_id}", headers=headers)
+        self.assertEqual(status, 200)
+        self.assertEqual(detail["owner_id"], registered["user"]["id"])
+        status, shared = self.request("POST", f"/api/v1/itineraries/{itinerary_id}/share", headers=headers)
+        self.assertEqual(status, 200)
+        status, shared_detail = self.request("GET", f"/api/v1{shared['share_path']}")
+        self.assertEqual(status, 200)
+        self.assertEqual(shared_detail["id"], itinerary_id)
+        status, _ = self.request("DELETE", f"/api/v1/itineraries/{itinerary_id}/share", headers=headers)
+        self.assertEqual(status, 200)
+        status, _ = self.request("GET", f"/api/v1{shared['share_path']}")
+        self.assertEqual(status, 404)
+        status, _ = self.request("DELETE", f"/api/v1/itineraries/{itinerary_id}", headers=headers)
+        self.assertEqual(status, 200)
+
+    def test_22_owner_availability_maintenance_and_driver_routes(self):
+        _, registered = self.request("POST", "/api/v1/auth/register", {
+            "name": "Owner Routes", "email": "owner-routes@example.com",
+            "password": "OwnerRoutesPassword123!", "role": "owner"
+        })
+        headers = {"Authorization": f"Bearer {registered['access_token']}"}
+        _, vehicle = self.request("POST", "/api/v1/vehicles", {
+            "title": "City car", "category": "Car", "price_per_day": 1000, "city": "Chennai"
+        }, headers)
+        vehicle_id = vehicle["id"]
+        block_path = f"/api/v1/owner/vehicles/{vehicle_id}/availability-blocks"
+        status, _ = self.request("GET", block_path)
+        self.assertEqual(status, 401)
+        status, _ = self.request("POST", block_path, {"start_date":"2027-04-05","end_date":"2027-04-04","reason":"Maintenance"}, headers)
+        self.assertEqual(status, 422)
+        status, block = self.request("POST", block_path, {"start_date":"2027-04-04","end_date":"2027-04-05","reason":"Maintenance"}, headers)
+        self.assertEqual(status, 201)
+        status, blocks = self.request("GET", block_path, headers=headers)
+        self.assertEqual(status, 200)
+        self.assertEqual(len(blocks), 1)
+        maintenance_path = f"/api/v1/owner/vehicles/{vehicle_id}/maintenance"
+        status, maintenance = self.request("POST", maintenance_path, {
+            "description":"Scheduled service", "service_date":"2027-04-06", "cost":1200, "status":"scheduled"
+        }, headers)
+        self.assertEqual(status, 201)
+        maintenance_id = maintenance["id"]
+        status, _ = self.request("PATCH", f"{maintenance_path}/{maintenance_id}", {
+            "description":"Scheduled service", "service_date":"2027-04-06", "cost":1200, "status":"completed"
+        }, headers)
+        self.assertEqual(status, 200)
+        _, driver = self.request("POST", "/api/v1/owner/drivers", {
+            "name":"Test Driver", "phone":"+919876543210", "licence_number":"LIC-ROUTES-001"
+        }, headers)
+        status, inactive = self.request("PATCH", f"/api/v1/owner/drivers/{driver['id']}/status?active=false", headers=headers)
+        self.assertEqual(status, 200)
+        self.assertFalse(inactive["active"])
+        status, reputation = self.request("GET", "/api/v1/owner/reputation", headers=headers)
+        self.assertEqual(status, 200)
+        self.assertEqual(reputation["vehicle_count"], 1)
+        status, _ = self.request("DELETE", f"{block_path}/{block['id']}", headers=headers)
+        self.assertEqual(status, 200)
+
+    def test_23_admin_workspace_routes_filter_and_enforce_authorization(self):
+        _, admin_login = self.request("POST", "/api/v1/auth/login", {
+            "email":"admin@elsewhere.com", "password":"AdminPass123!"
+        })
+        admin_headers = {"Authorization": f"Bearer {admin_login['access_token']}"}
+        status, _ = self.request("GET", "/api/v1/admin/users")
+        self.assertEqual(status, 401)
+        status, users = self.request("GET", "/api/v1/admin/users?q=admin%40elsewhere.com&page=1&page_size=10", headers=admin_headers)
+        self.assertEqual(status, 200)
+        self.assertTrue(any(user["email"] == "admin@elsewhere.com" for user in users["items"]))
+        status, destinations = self.request("GET", "/api/v1/admin/destinations?status=all", headers=admin_headers)
+        self.assertEqual(status, 200)
+        self.assertIn("pages", destinations)
+        status, analytics = self.request("GET", "/api/v1/admin/analytics/overview?days=30", headers=admin_headers)
+        self.assertEqual(status, 200)
+        self.assertIn("booking_status", analytics)
+
+    def test_24_email_admin_routes_and_retry_provider_failure(self):
+        _, admin_login = self.request("POST", "/api/v1/auth/login", {
+            "email":"admin@elsewhere.com", "password":"AdminPass123!"
+        })
+        headers = {"Authorization": f"Bearer {admin_login['access_token']}"}
+        db = self.Session()
+        item = models.NotificationEmailLog(user_id="admin-1", recipient_email="a@example.com",
+            subject="Retry me", category="booking_updates", status="dead_letter", email_body="Details", retry_count=3)
+        db.add(item); db.commit(); db.refresh(item); log_id = item.id; db.close()
+        status, _ = self.request("GET", "/api/v1/admin/email-delivery-logs")
+        self.assertEqual(status, 401)
+        status, listing = self.request("GET", "/api/v1/admin/email-delivery-logs?status=dead_letter", headers=headers)
+        self.assertEqual(status, 200)
+        self.assertTrue(any(row["id"] == log_id for row in listing["items"]))
+        status, detail = self.request("GET", f"/api/v1/admin/email-delivery-logs/{log_id}", headers=headers)
+        self.assertEqual(status, 200)
+        self.assertEqual(detail["email_body"], "Details")
+        status, summary = self.request("GET", "/api/v1/admin/email-delivery-logs/summary", headers=headers)
+        self.assertEqual(status, 200)
+        self.assertGreaterEqual(summary["dead_letter"], 1)
+        status, _ = self.request("POST", f"/api/v1/admin/email-delivery-logs/{log_id}/requeue", headers=headers)
+        self.assertEqual(status, 200)
+        self.assertEqual(self.Session().get(models.NotificationEmailLog, log_id).status, "failed")
+
+    def test_25_provider_catalog_and_tour_request_endpoints(self):
+        _, provider = self.request("POST", "/api/v1/auth/register", {
+            "name":"Agency Routes", "email":"agency-routes@example.com",
+            "password":"AgencyRoutesPassword123!", "role":"agency"
+        })
+        provider_headers={"Authorization":f"Bearer {provider['access_token']}"}
+        status, _ = self.request("PUT", "/api/v1/providers/me/profile", {
+            "business_name":"Agency Routes", "description":"Local journeys", "service_areas":["Chennai"]
+        }, provider_headers)
+        self.assertEqual(status, 200)
+        status, profile = self.request("GET", "/api/v1/providers/me/profile", headers=provider_headers)
+        self.assertEqual(status, 200)
+        self.assertEqual(profile["profile"]["business_name"], "Agency Routes")
+        status, package = self.request("POST", "/api/v1/providers/me/tour-packages", {
+            "title":"Coastal Escape", "destination":"Pondicherry", "summary":"A relaxed coast break",
+            "description":"Three days by the sea", "duration_days":3,"price_per_person":5000,
+            "currency":"INR","max_travellers":8,"itinerary":[{"title":"Day 1","details":"Arrival"}],
+            "inclusions":["Breakfast"],"exclusions":[],"is_published":True
+        }, provider_headers)
+        self.assertEqual(status, 201)
+        status, public_list = self.request("GET", "/api/v1/tour-packages?destination=Pondicherry")
+        self.assertEqual(status, 200)
+        self.assertTrue(any(row["id"]==package["id"] for row in public_list))
+        status, public_detail = self.request("GET", f"/api/v1/tour-packages/{package['slug']}")
+        self.assertEqual(status, 200)
+        self.assertEqual(public_detail["currency"], "INR")
+        _, customer = self.request("POST", "/api/v1/auth/register", {
+            "name":"Package Traveller", "email":"package-traveller@example.com",
+            "password":"PackageTravellerPassword123!", "role":"customer"
+        })
+        customer_headers={"Authorization":f"Bearer {customer['access_token']}"}
+        db=self.Session();request=models.TourPackageRequest(package_id=package["id"],customer_id=customer["user"]["id"],
+          provider_id=provider["user"]["id"],start_date=date.today()+timedelta(days=40),travellers=2,contact_phone="1234567890",message="Please confirm")
+        db.add(request);db.commit();request_id=request.id;db.close()
+        status, requests=self.request("GET","/api/v1/tour-package-requests/mine",headers=customer_headers)
+        self.assertEqual(status,200);self.assertTrue(any(row["id"]==request_id for row in requests))
+        status, provider_requests=self.request("GET","/api/v1/providers/me/tour-package-requests",headers=provider_headers)
+        self.assertEqual(status,200);self.assertTrue(any(row["id"]==request_id for row in provider_requests))
+        status, updated=self.request("PATCH",f"/api/v1/providers/me/tour-package-requests/{request_id}",
+          {"status":"reviewing","provider_note":"Checking dates"},provider_headers)
+        self.assertEqual(status,200);self.assertEqual(updated["status"],"reviewing")
+        status,cancelled=self.request("PATCH",f"/api/v1/tour-package-requests/{request_id}/cancel",headers=customer_headers)
+        self.assertEqual(status,200);self.assertEqual(cancelled["status"],"cancelled")
 
 if __name__ == "__main__":
     unittest.main()
